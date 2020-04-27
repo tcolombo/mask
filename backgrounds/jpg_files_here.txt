@@ -1,0 +1,1 @@
+Place your jpg files here using the mask_add_bg command
