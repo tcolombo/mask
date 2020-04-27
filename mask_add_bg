@@ -1,0 +1,66 @@
+#!/usr/bin/python3
+
+from PyInquirer import prompt
+import sys
+import subprocess
+import shutil
+import os
+from typing import Union
+
+
+IMG_SIZE = {
+    'width'  : 960,
+    'height' : 720
+}
+
+MAX_MSG_SIZE = 50
+
+PATH = os.path.dirname(os.path.abspath(__file__))
+
+
+def get_filename() -> str:
+    if len(sys.argv) != 2:
+        print('Syntax: mask_add_bg <filename>')
+        print('    - filename is the name of a jpg file')
+        exit(1)
+    
+    filetype = subprocess.getoutput("identify {} | cut -d' ' -f2".format(sys.argv[1]))
+    if filetype != 'JPEG':
+        print('Error: You must give a JPEG file')
+        exit(3)
+ 
+    image_size = subprocess.getoutput("identify -format '%wx%h' {}".format(sys.argv[1]))
+    if image_size != '{}x{}'.format(IMG_SIZE['width'], IMG_SIZE['height']):
+        subprocess.getoutput('convert {} -resize {}x{}\! -quality 100 {}'.format(sys.argv[1], IMG_SIZE['width'], IMG_SIZE['height'], 'mask_' + sys.argv[1]))
+    else:
+        shutil.copyfile(sys.argv[1], 'mask_' + sys.argv[1])
+        
+    return 'mask_' + sys.argv[1]
+
+
+def short_string(message : str) -> Union[str, bool]:
+    if len(message) > MAX_MSG_SIZE:
+        return 'Your description must be less than {} characters'.format(MAX_MSG_SIZE)
+    else:
+        return True
+
+
+def get_description():
+    widget = [
+        {
+            'type': 'input',
+            'name': 'description',
+            'message': 'Brief description of the image (max. {} characters):'.format(MAX_MSG_SIZE),
+            'validate': short_string
+        }
+    ]
+    result = prompt(widget)
+
+    return result['description']
+
+
+if __name__ == '__main__':
+    filename = get_filename()
+    description = get_description()
+    subprocess.getoutput("jhead -cl '{}' {}".format(description, filename))
+    shutil.move(filename, os.path.join(PATH, 'backgrounds', filename[5:]))

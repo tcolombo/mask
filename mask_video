@@ -1,0 +1,114 @@
+#!/usr/bin/python3
+
+import cv2
+from typing import TypeVar, Dict
+import numpy
+import requests
+import sys
+from PyInquirer import prompt
+import subprocess
+from collections import OrderedDict
+import os
+import pyfakewebcam
+import docker
+
+
+T_VideoCapture = TypeVar('cv2.VideoCapture')
+T_Container = TypeVar('docker.models.containers.Container')
+T_ndarray = TypeVar('numpy.ndarray')
+
+
+CAMERA = {
+    'name'   : 'Logitech C920',
+    'device' : '/dev/video0',
+    'height' : 720,
+    'width'  : 960,
+    'fps'    : 30
+}
+
+FAKE_CAMERA = {
+    'name'   : 'fake_webcam',
+    'device' : '/dev/video10',
+    'height' : 720,
+    'width'  : 960
+}
+
+PATH = os.path.dirname(os.path.abspath(__file__))
+
+
+def configure_camera() -> T_VideoCapture:
+    cap = cv2.VideoCapture(CAMERA['device'])
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA['width'])
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA['height'])
+    cap.set(cv2.CAP_PROP_FPS, CAMERA['fps'])
+    return cap
+
+
+def get_mask(frame : T_ndarray, bodypix_service : str = 'http://localhost:9000') -> T_ndarray:
+    _, data = cv2.imencode('.jpg', frame)
+    req = requests.post(
+        url = bodypix_service,
+        data = data.tobytes(),
+        headers = {'Content-Type' : 'application/octet-stream'}
+    )
+
+    mask = numpy.frombuffer(req.content, dtype=numpy.uint8)
+    mask = mask.reshape((frame.shape[0], frame.shape[1]))
+
+    return mask
+
+
+def get_frame(cap : T_VideoCapture, cap_video : T_VideoCapture, background : str) -> T_VideoCapture:
+    _, frame = cap.read()
+
+    mask = None
+    while mask is None:
+        try:
+            mask = get_mask(frame)
+        except requests.RequestException:
+            print('Unable to get mask : retrying...')
+
+    if cap_video is None:
+        cap_video = cv2.VideoCapture(background)
+    succes, background_raw = cap_video.read()
+    if not succes:
+        cap_video = cv2.VideoCapture(background)
+        _, background_raw = cap_video.read()
+    background = cv2.resize(background_raw, (FAKE_CAMERA['width'], FAKE_CAMERA['height']))
+
+    inv_mask = 1 - mask
+    for c in range(frame.shape[2]):
+        frame[:, :, c] = frame[:, :, c] * mask + background[:,:,c] * inv_mask
+
+    return (frame, cap_video)
+
+
+def start_fakecam() -> None:
+    os.system('sudo modprobe -r v4l2loopback')
+    os.system('sudo modprobe v4l2loopback devices=1 video_nr=10 card_label="fake_webcam" exclusive_caps=1')
+
+
+def start_bodypix() -> T_Container:
+    client = docker.from_env()
+    container = client.containers.run('bg_changer', ports={'9000':9000}, detach=True)
+    return client.containers.get(container.short_id)
+
+
+if __name__ == '__main__':
+    start_fakecam()
+    bodypix_microservice = start_bodypix()
+    cap = configure_camera()
+    cap_video = None
+    fake = pyfakewebcam.FakeWebcam(FAKE_CAMERA['device'], FAKE_CAMERA['width'], FAKE_CAMERA['height'])
+    print('Running...')
+
+    try:
+        while True:
+            frame, cap_video = get_frame(cap, cap_video, os.path.join(PATH, 'backgrounds_video', 'earth.mp4'))
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            fake.schedule_frame(frame)
+    except KeyboardInterrupt:
+        print('\nStoping bodypix microservice...')
+        bodypix_microservice.stop()
+        print('Goodbye !')
+        exit(0)
